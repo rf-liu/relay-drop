@@ -17,25 +17,25 @@
     "lint": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit"
   },
   "dependencies": {
-    "@fastify/multipart": "^9.3.0",
-    "@fastify/static": "^10.1.2",
+    "@fastify/multipart": "^10.1.2",
+    "@fastify/static": "^10.1.5",
     "archiver": "8.0.0",
     "fastify": "^5.12.5",
-    "lucide-react": "^1.27.0",
-    "react": "^19.2.6",
-    "react-dom": "^19.2.6",
+    "lucide-react": "^1.52.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
     "sharp": "^0.35.4"
   },
   "devDependencies": {
     "@types/archiver": "^8.0.0",
-    "@types/node": "^22.19.19",
-    "@types/react": "^19.2.14",
-    "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^6.0.2",
+    "@types/node": "^26.6.4",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
     "concurrently": "^10.0.6",
-    "happy-dom": "20.11.12",
-    "tsx": "^4.23.12",
-    "typescript": "^5.9.3",
-    "vite": "^8.2.2"
+    "happy-dom": "20.14.5",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.3"
   }
 }
