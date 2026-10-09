@@ -556,18 +556,118 @@ test("selected files can be downloaded individually or together as a streamed ar
   await flush();
 
   await click('[aria-label="选择 first.txt"]');
-  assert.match(dom.document.querySelector(".batch-download")?.textContent ?? "", /下载 1 项/);
+  assert.equal(dom.document.querySelector(".batch-download")?.getAttribute("aria-label"), "下载 1 项");
   await click(".batch-download");
   assert.deepEqual(downloads, [`/api/files/${files[0].id}/download`]);
   assert.equal(requests.filter((request) => request.url === "/api/files/archive").length, 0);
 
   await click('[aria-label="选择 second.txt"]');
-  assert.match(dom.document.querySelector(".batch-download")?.textContent ?? "", /下载 2 项/);
+  assert.equal(dom.document.querySelector(".batch-download")?.getAttribute("aria-label"), "下载 2 项");
   await click(".batch-download");
   assert.equal(downloads.at(-1), "/api/files/archive/test-ticket");
   const request = requests.find((item) => item.url === "/api/files/archive");
   assert.equal(request?.method, "POST");
   assert.deepEqual(new Set(request?.body.ids), new Set(files.map((file) => file.id)));
+});
+
+test("file rows support range selection, mixed select-all, visible-only filtering, and escape", async (t) => {
+  const files = ["A.pdf", "B.pdf", "C.zip"].map((name, index) => ({ id: `file-${index}`, name, size: 10, mime: "application/octet-stream", createdAt: `2026-01-0${index + 1}T00:00:00Z`, hasThumbnail: false }));
+  await setup(t, ({ control }) => { control.files = files; }, false);
+  await flush();
+  const rows = [...dom.document.querySelectorAll<HTMLElement>(".file-row")];
+  await act(async () => { rows[0].click(); });
+  assert.equal(field("选择 C.zip").checked, true);
+  assert.equal(field("全选文件").indeterminate, true);
+  await act(async () => { rows[2].dispatchEvent(new dom.MouseEvent("click", { bubbles: true, shiftKey: true }) as unknown as Event); });
+  assert.equal(dom.document.querySelectorAll('.row-select input:checked').length, 3);
+  assert.equal(field("全选文件").indeterminate, false);
+  assert.equal(field("全选文件").checked, true);
+  await type("搜索文件", ".pdf");
+  assert.match(dom.document.querySelector('.selection-hidden')?.textContent ?? "", /含 1 项/);
+  await click('[aria-label="全选搜索结果"]');
+  assert.equal(dom.document.querySelectorAll('.row-select input:checked').length, 0);
+  assert.match(dom.document.querySelector('.selection-count')?.textContent ?? "", /已选 1 项/);
+  await type("搜索文件", "no matches");
+  assert.equal(dom.document.querySelector<HTMLButtonElement>('.batch-download')?.disabled, false);
+  await click('[aria-label="取消选择"]');
+  assert.equal(dom.document.querySelector<HTMLButtonElement>('.batch-download')?.disabled, true);
+  await type("搜索文件", "");
+  await click('[aria-label="选择 A.pdf"]');
+  await act(async () => { field("选择 A.pdf").dispatchEvent(new dom.KeyboardEvent("keydown", { bubbles: true, key: "Escape" }) as unknown as Event); });
+  assert.equal(dom.document.querySelectorAll('.row-select input:checked').length, 0);
+});
+
+test("rename actions do not change selection and Enter during Chinese composition cannot save a name", async (t) => {
+  const file = { id: "rename-test", name: "draft.txt", size: 10, mime: "text/plain", createdAt: "2026-01-01T00:00:00Z", hasThumbnail: false };
+  const { requests } = await setup(t, ({ control }) => { control.files = [file]; }, false);
+  await flush();
+  await click('[aria-label="选择 draft.txt"]');
+  await click('[aria-label="重命名 draft.txt"]');
+  assert.equal(field("选择 draft.txt").checked, true);
+  await type("修改 draft.txt 的文件名", "笔记.txt");
+  await act(async () => { field("修改 draft.txt 的文件名").dispatchEvent(new dom.KeyboardEvent("keydown", { bubbles: true, key: "Enter", isComposing: true }) as unknown as Event); });
+  assert.equal(requests.some((request) => request.method === "PATCH"), false);
+  await act(async () => { field("修改 draft.txt 的文件名").dispatchEvent(new dom.KeyboardEvent("keydown", { bubbles: true, key: "Escape" }) as unknown as Event); });
+  assert.equal(dom.document.querySelector('.rename-input'), null);
+  assert.equal(field("选择 draft.txt").checked, true);
+});
+
+test("confirmed uploads appear and dismiss individually before the batch or refresh finishes", async (t) => {
+  const { control } = await setup(t, undefined, false);
+  await flush();
+  const requests: FakeXHR[] = [];
+  const originalXHR = globalThis.XMLHttpRequest;
+  class FakeXHR {
+    upload: { onprogress: ((event: Partial<ProgressEvent>) => void) | null; onload: (() => void) | null } = { onprogress: null, onload: null };
+    status = 201;
+    responseText = "";
+    file!: globalThis.File;
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    onabort: (() => void) | null = null;
+    open() {}
+    setRequestHeader() {}
+    abort() { this.onabort?.(); }
+    send(body: FormData) { this.file = body.get("file") as globalThis.File; requests.push(this); }
+    finish() {
+      const file = { id: `uploaded-${requests.indexOf(this)}`, name: this.file.name, size: this.file.size, mime: this.file.type, createdAt: "2026-01-01T00:00:00Z", hasThumbnail: false };
+      control.files.push(file);
+      this.responseText = JSON.stringify({ file });
+      this.onload?.();
+    }
+  }
+  Object.defineProperty(globalThis, "XMLHttpRequest", { configurable: true, value: FakeXHR });
+  const originalTimeout = dom.setTimeout;
+  const completions: Array<() => void> = [];
+  dom.setTimeout = ((fn: () => void, ms: number) => {
+    if (ms === 600) { completions.push(fn); return -(completions.length); }
+    return originalTimeout(fn, ms);
+  }) as typeof dom.setTimeout;
+  const refreshGate = deferred();
+  t.after(() => { refreshGate.resolve(); dom.setTimeout = originalTimeout; Object.defineProperty(globalThis, "XMLHttpRequest", { configurable: true, value: originalXHR }); });
+  const pasted = new dom.Event("paste", { bubbles: true, cancelable: true });
+  Object.defineProperty(pasted, "clipboardData", { value: { files: Array.from({ length: 14 }, (_, index) => new dom.File(["file"], `${index}.txt`, { type: "text/plain" })), items: [] } });
+  await act(async () => { dom.dispatchEvent(pasted); });
+  assert.equal(dom.document.querySelectorAll('.upload-task').length, 14);
+  assert.equal(requests.length, 1);
+  assert.equal(dom.document.querySelectorAll('.upload-task.queued').length, 13);
+  await act(async () => { requests[0].upload.onprogress?.({ lengthComputable: true, loaded: 100, total: 100 }); });
+  assert.match(dom.document.querySelector('.upload-task.processing')?.textContent ?? "", /服务器处理中/);
+  assert.doesNotMatch(dom.document.querySelector('.upload-task.processing')?.textContent ?? "", /100%/);
+  assert.equal(dom.document.querySelectorAll('.file-row').length, 0);
+  await act(async () => { requests[0].finish(); });
+  assert.equal(dom.document.querySelectorAll('.file-row').length, 1);
+  assert.equal(requests.length, 2);
+  await act(async () => { completions[0](); });
+  assert.equal(dom.document.querySelectorAll('.upload-task.done').length, 0);
+  assert.equal(dom.document.querySelectorAll('.upload-task').length, 13);
+  control.before = async (_method, url) => { if (url === "/api/state") await refreshGate.promise; };
+  for (let index = 1; index < 14; index += 1) await act(async () => { requests[index].finish(); });
+  assert.equal(dom.document.querySelectorAll('.file-row').length, 14);
+  await act(async () => { completions.slice(1).forEach((finish) => finish()); });
+  assert.equal(dom.document.querySelectorAll('.upload-task').length, 0);
+  refreshGate.resolve();
+  await flush();
 });
 
 test("saved note images expand inline from the original and unlink without deleting the shared file", async (t) => {

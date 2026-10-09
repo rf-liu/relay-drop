@@ -64,7 +64,7 @@ interface UploadTask {
   id: string;
   name: string;
   progress: number;
-  status: "uploading" | "done" | "error";
+  status: "queued" | "uploading" | "processing" | "done" | "error";
   error?: string;
   // 保留原文件引用，失败后可以在同一行重试，而不是新增一行。
   file: globalThis.File;
@@ -272,6 +272,9 @@ export default function App() {
   const [toast, setToast] = useState<ToastState | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const renameInput = useRef<HTMLInputElement>(null);
+  const selectAllInput = useRef<HTMLInputElement>(null);
+  const selectionAnchor = useRef<string | null>(null);
+  const completedUploadTimers = useRef(new Set<number>());
   const dirtyRef = useRef(false);
   const draftRef = useRef("");
   const clipboardEditRevision = useRef(0);
@@ -294,6 +297,10 @@ export default function App() {
   const cancelled = useRef(new Set<string>());
   // 所有上传（新批次和手动重试）共用一条队列，避免多批并发一起压垮弱网链路。
   const uploadChain = useRef<Promise<void>>(Promise.resolve());
+
+  useEffect(() => () => {
+    for (const timer of completedUploadTimers.current) window.clearTimeout(timer);
+  }, []);
 
   useEffect(() => {
     let navigation = 0;
@@ -589,14 +596,22 @@ export default function App() {
     xhr.upload.onprogress = (event) => {
       const now = Date.now();
       lastMovedAt = now;
-      if (!event.lengthComputable) return;
-      const patch: Partial<UploadTask> = { progress: Math.round(event.loaded / event.total * 100) };
+      if (!event.lengthComputable || event.total <= 0) return;
+      const finishedSending = event.total > 0 && event.loaded >= event.total;
+      const patch: Partial<UploadTask> = {
+        progress: Math.min(99, Math.round(event.loaded / event.total * 100)),
+        status: finishedSending ? "processing" : "uploading",
+      };
       if (now - sampleAt >= SPEED_SAMPLE_MS) {
         patch.speed = (event.loaded - sampleLoaded) / ((now - sampleAt) / 1000);
         sampleAt = now;
         sampleLoaded = event.loaded;
       }
       updateUpload(taskId, patch);
+    };
+    xhr.upload.onload = () => {
+      lastMovedAt = Date.now();
+      updateUpload(taskId, { status: "processing", progress: 99, speed: undefined });
     };
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) {
@@ -637,7 +652,23 @@ export default function App() {
       updateUpload(taskId, { status: "uploading", progress: 0, error: undefined, retryable: undefined, speed: undefined });
       const outcome = await sendOnce(file, taskId);
       if (outcome.ok) {
+        // Show each confirmed file immediately. A slow batch or state refresh
+        // must not keep a finished upload waiting at 100%.
+        invalidateStateRead();
+        setState((current) => {
+          const existing = current.files.some((item) => item.id === outcome.file.id);
+          return {
+            ...current,
+            files: existing ? current.files.map((item) => item.id === outcome.file.id ? outcome.file : item) : [outcome.file, ...current.files],
+            storage: { ...current.storage, usedBytes: current.storage.usedBytes + (existing ? 0 : outcome.file.size) },
+          };
+        });
         updateUpload(taskId, { progress: 100, status: "done", error: undefined, speed: undefined });
+        const timer = window.setTimeout(() => {
+          setUploads((current) => current.filter((task) => task.id !== taskId));
+          completedUploadTimers.current.delete(timer);
+        }, 600);
+        completedUploadTimers.current.add(timer);
         return outcome.file;
       }
       if (cancelled.current.has(taskId)) break;
@@ -651,12 +682,14 @@ export default function App() {
     }
     // 取消过的任务留一个可以手动重来的入口。
     updateUpload(taskId, { status: "error", error: "已取消", retryable: true, speed: undefined });
+    cancelled.current.delete(taskId);
     return null;
   };
 
   const cancelUpload = (taskId: string) => {
     cancelled.current.add(taskId);
     activeUploads.current.get(taskId)?.abort();
+    updateUpload(taskId, { status: "error", error: "已取消", retryable: false, speed: undefined });
   };
 
   // 自适应并发队列：网快就多开几路，一旦出现网络类失败立刻退回串行。
@@ -725,21 +758,20 @@ export default function App() {
       id: crypto.randomUUID(),
       name: file.name,
       progress: 0,
-      status: "uploading" as const,
+      status: "queued" as const,
       file,
     }));
-    setUploads((current) => [...tasks, ...current].slice(0, 12));
+    setUploads((current) => [...current, ...tasks]);
 
     // 批次之间也要排队。否则连着拖两次文件，就变成两条队列各自并发，
     // 弱网下又回到「一起发、一起失败」的老问题。
     const batch = uploadChain.current.then(async () => {
       const uploaded = await runUploadQueue(accepted.map((file, index) => ({ file, taskId: tasks[index].id })));
-      await loadState({ force: true });
+      void loadState({ force: true });
       const failed = accepted.length - uploaded.length;
       if (!failed) notify(`${uploaded.length} 个文件已放入中转区`);
       else if (!uploaded.length) notify(`${failed} 个文件上传失败，可以点重试`, "error");
       else notify(`${uploaded.length} 个已上传，${failed} 个失败，可以点重试`, "error");
-      window.setTimeout(() => setUploads((current) => current.filter((task) => task.status !== "done")), 2200);
       return uploaded;
     });
     uploadChain.current = batch.then(() => undefined, () => undefined);
@@ -748,19 +780,17 @@ export default function App() {
 
   const retryUpload = (taskId: string) => {
     const task = uploads.find((item) => item.id === taskId);
-    if (!task || task.status === "uploading") return;
-    updateUpload(taskId, { status: "uploading", progress: 0, error: undefined });
+    if (!task || task.status !== "error") return;
+    updateUpload(taskId, { status: "queued", progress: 0, error: undefined });
     uploadChain.current = uploadChain.current.then(async () => {
       cancelled.current.delete(taskId);
       const file = await uploadOne(task.file, taskId);
-      await loadState({ force: true });
+      void loadState({ force: true });
       notify(file ? `${task.name} 已放入中转区` : `${task.name} 仍然失败`, file ? "success" : "error");
-      if (file) window.setTimeout(() => setUploads((current) => current.filter((item) => item.status !== "done")), 2200);
     });
   };
 
   const dismissUpload = (taskId: string) => {
-    cancelled.current.delete(taskId);
     setUploads((current) => current.filter((task) => task.id !== taskId));
   };
 
@@ -863,17 +893,34 @@ export default function App() {
 
   const allVisibleSelected = visibleFiles.length > 0
     && visibleFiles.every((file) => selectedIds.has(file.id));
+  const selectedVisibleCount = visibleFiles.filter((file) => selectedIds.has(file.id)).length;
+  const hiddenSelectedCount = selectedIds.size - selectedVisibleCount;
 
-  const toggleSelected = (id: string) => {
+  useEffect(() => {
+    if (selectAllInput.current) selectAllInput.current.indeterminate = selectedVisibleCount > 0 && !allVisibleSelected;
+  }, [selectedVisibleCount, allVisibleSelected]);
+
+  const clearSelection = () => { setSelectedIds(new Set()); selectionAnchor.current = null; };
+
+  const toggleSelected = (id: string, range = false) => {
+    if (batchDeleting) return;
+    const anchorIndex = visibleFiles.findIndex((file) => file.id === selectionAnchor.current);
+    const targetIndex = visibleFiles.findIndex((file) => file.id === id);
+    const rangeIds = range && anchorIndex >= 0 && targetIndex >= 0
+      ? visibleFiles.slice(Math.min(anchorIndex, targetIndex), Math.max(anchorIndex, targetIndex) + 1).map((file) => file.id)
+      : null;
+    if (!rangeIds) selectionAnchor.current = id;
     setSelectedIds((current) => {
       const next = new Set(current);
-      if (next.has(id)) next.delete(id);
+      if (rangeIds) rangeIds.forEach((fileId) => next.add(fileId));
+      else if (next.has(id)) next.delete(id);
       else next.add(id);
       return next;
     });
   };
 
   const toggleAllVisible = () => {
+    selectionAnchor.current = null;
     setSelectedIds((current) => {
       const next = new Set(current);
       for (const file of visibleFiles) {
@@ -887,7 +934,7 @@ export default function App() {
   const deleteSelected = async () => {
     const ids = [...selectedIds];
     if (!ids.length) return;
-    if (!window.confirm(`确认删除选中的 ${ids.length} 个文件？这会立即从所有设备移除。`)) return;
+    if (!window.confirm(`确认删除选中的 ${ids.length} 个文件？${hiddenSelectedCount ? `其中 ${hiddenSelectedCount} 个不在当前搜索结果中。` : ""}这会立即从所有设备移除。`)) return;
     setBatchDeleting(true);
     try {
       const result = await api<{
@@ -1040,7 +1087,14 @@ export default function App() {
         </div>
       </section>
 
-      <section className="card files-card">
+      <section className="card files-card" aria-label="文件中转区" onKeyDown={(event) => {
+        if ((event.target as HTMLElement).closest('textarea, input:not([type="checkbox"]), select')) return;
+        if (event.key === "Escape" && !batchDeleting) { event.preventDefault(); clearSelection(); }
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a" && !batchDeleting) {
+          event.preventDefault();
+          setSelectedIds((current) => new Set([...current, ...visibleFiles.map((file) => file.id)]));
+        }
+      }}>
         <div className="card-heading files-heading">
           <div className="heading-copy">
             <div className="section-icon blue"><Archive size={19} /></div>
@@ -1067,20 +1121,14 @@ export default function App() {
             if (!event.currentTarget.contains(event.relatedTarget as Node)) setDragging(false);
           }}
           onDrop={onDrop}
-          onClick={() => fileInput.current?.click()}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" || event.key === " ") fileInput.current?.click();
-          }}
-          role="button"
-          tabIndex={0}
-          aria-label="选择或拖拽文件上传"
         >
           <input ref={fileInput} type="file" multiple hidden onChange={onFileInput} />
           <div className="drop-icon"><CloudUpload size={24} /></div>
           <div className="drop-copy">
             <strong>{dragging ? "松开即可上传" : "拖拽文件到这里"}</strong>
-            <span>点按选择、直接粘贴 · 单个最大 {formatBytes(state.limits.maxUploadBytes)}</span>
+            <span>也可直接粘贴 · 单个最大 {formatBytes(state.limits.maxUploadBytes)}</span>
           </div>
+          <button className="button secondary choose-files" type="button" onClick={() => fileInput.current?.click()}>选择文件</button>
         </div>
 
         {uploads.length > 0 && (
@@ -1090,21 +1138,21 @@ export default function App() {
                 <div className="task-state">
                   {/* 失败用警告图标而不是 ✕：这里是状态指示，不是关闭按钮。
                       右侧那个 ✕ 才是真正能点掉这条记录的。 */}
-                  {task.status === "done" ? <Check size={15} /> : task.status === "error" ? <TriangleAlert size={15} /> : <LoaderCircle className="spin" size={15} />}
+                  {task.status === "done" ? <Check size={15} /> : task.status === "error" ? <TriangleAlert size={15} /> : task.status === "queued" ? <span className="queued-dot" /> : <LoaderCircle className="spin" size={15} />}
                 </div>
                 <div className="task-main">
                   <div>
                     <strong>{task.name}</strong>
                     <span>
                       {task.error
-                        || (task.speed ? `${task.progress}% · ${formatBytes(task.speed)}/s` : `${task.progress}%`)}
+                        || (task.status === "queued" ? "等待上传" : task.status === "processing" ? "服务器处理中…" : task.status === "done" ? "已上传" : task.speed ? `${task.progress}% · ${formatBytes(task.speed)}/s` : `${task.progress}%`)}
                     </span>
                   </div>
                   <div className="progress-track"><span style={{ width: `${task.progress}%` }} /></div>
                 </div>
                 {task.status !== "done" && (
                   <div className="task-actions">
-                    {task.status === "uploading" && (
+                    {["uploading", "processing"].includes(task.status) && (
                       <button onClick={() => cancelUpload(task.id)} aria-label={`取消上传 ${task.name}`} title="取消">
                         <X size={14} />
                       </button>
@@ -1132,31 +1180,6 @@ export default function App() {
             <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索文件" aria-label="搜索文件" />
             {query && <button onClick={() => setQuery("")} aria-label="清除搜索"><X size={14} /></button>}
           </label>
-          {visibleFiles.length > 0 && (
-            <div className="selection-tools">
-              <label className="select-all">
-                <input
-                  type="checkbox"
-                  checked={allVisibleSelected}
-                  onChange={toggleAllVisible}
-                  aria-label={query ? "全选搜索结果" : "全选文件"}
-                />
-                <span>{query ? "全选结果" : "全选"}</span>
-              </label>
-              {selectedIds.size > 0 && (
-                <button className="batch-download" onClick={() => void downloadSelected()} disabled={batchDownloading || batchDeleting}>
-                  {batchDownloading ? <LoaderCircle className="spin" size={14} /> : <Download size={14} />}
-                  下载 {selectedIds.size} 项
-                </button>
-              )}
-              {selectedIds.size > 0 && (
-                <button className="batch-delete" onClick={() => void deleteSelected()} disabled={batchDeleting || batchDownloading}>
-                  {batchDeleting ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}
-                  删除 {selectedIds.size} 项
-                </button>
-              )}
-            </div>
-          )}
           <select className="sort-select" value={sort} onChange={(event) => setSort(event.target.value as typeof sort)} aria-label="文件排序">
             <option value="newest">最新上传</option>
             <option value="name">按名称</option>
@@ -1164,21 +1187,49 @@ export default function App() {
           </select>
         </div>
 
-        <div className="file-list">
+        {(state.files.length > 0 || selectedIds.size > 0) && <div className={`file-selection-toolbar ${selectedIds.size ? "has-selection" : ""}`}>
+          <div className="selection-summary">
+            <label className="select-all">
+              <input ref={selectAllInput} type="checkbox" checked={allVisibleSelected} onChange={toggleAllVisible} disabled={!visibleFiles.length || batchDeleting} aria-label={query ? "全选搜索结果" : "全选文件"} />
+              <span>全选</span>
+            </label>
+            <span className="selection-count" role="status">{selectedIds.size ? `已选 ${selectedIds.size} 项` : `${visibleFiles.length} 个文件`}</span>
+            <button className="selection-reset" onClick={clearSelection} disabled={!selectedIds.size || batchDeleting} aria-label="取消选择" title="取消选择（Esc）" style={{ visibility: selectedIds.size ? "visible" : "hidden" }}><X size={15} /></button>
+          </div>
+          <div className="selection-actions" style={{ visibility: selectedIds.size ? "visible" : "hidden" }}>
+            <button className="batch-download" onClick={() => void downloadSelected()} disabled={!selectedIds.size || batchDownloading || batchDeleting} aria-label={`下载 ${selectedIds.size} 项`}>
+              {batchDownloading ? <LoaderCircle className="spin" size={14} /> : <Download size={14} />} 下载
+            </button>
+            <button className="batch-delete" onClick={() => void deleteSelected()} disabled={!selectedIds.size || batchDeleting || batchDownloading} aria-label={`删除 ${selectedIds.size} 项`}>
+              {batchDeleting ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />} 删除
+            </button>
+          </div>
+          {hiddenSelectedCount > 0 && <span className="selection-hidden">含 {hiddenSelectedCount} 项搜索范围外的文件</span>}
+        </div>}
+
+        <div className="file-list" aria-label="文件列表">
           {loading ? (
             <div className="empty-state"><LoaderCircle className="spin" size={22} /><strong>正在读取</strong></div>
           ) : visibleFiles.length === 0 ? (
             <div className="empty-state">
               <div className="empty-icon"><File size={23} /></div>
               <strong>{query ? "没有匹配的文件" : "这里还没有文件"}</strong>
+              {query && <button className="button ghost" onClick={() => setQuery("")}>清除搜索</button>}
             </div>
           ) : visibleFiles.map((file) => (
-            <article className={`file-row ${selectedIds.has(file.id) ? "is-selected" : ""}`} key={file.id}>
+            <article className={`file-row ${selectedIds.has(file.id) ? "is-selected" : ""}`} key={file.id} tabIndex={-1} onClick={(event) => {
+              if ((event.target as HTMLElement).closest("button, a, input, label")) return;
+              if (editingId) return;
+              toggleSelected(file.id, event.shiftKey);
+              event.currentTarget.focus({ preventScroll: true });
+            }}>
               <label className="row-select">
                 <input
                   type="checkbox"
                   checked={selectedIds.has(file.id)}
-                  onChange={() => toggleSelected(file.id)}
+                  onChange={() => {}}
+                  onClick={(event) => toggleSelected(file.id, event.shiftKey)}
+                  disabled={batchDeleting}
                   aria-label={`选择 ${file.name}`}
                 />
               </label>
@@ -1192,10 +1243,11 @@ export default function App() {
                     onChange={(event) => setRenameDraft(event.target.value)}
                     onKeyDown={(event) => {
                       if (event.key === "Enter") {
+                        if (event.nativeEvent.isComposing) return;
                         event.preventDefault();
                         if (!renaming) void saveRename(file);
                       }
-                      if (event.key === "Escape") cancelRename();
+                      if (event.key === "Escape") { event.stopPropagation(); cancelRename(); }
                     }}
                     aria-label={`修改 ${file.name} 的文件名`}
                     maxLength={180}
