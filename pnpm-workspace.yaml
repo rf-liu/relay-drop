@@ -1,4 +1,7 @@
 allowBuilds:
   esbuild: true
 confirmModulesPurge: false
+overrides:
+  # Keep the established dev runner with the patched command quoting dependency.
+  concurrently>shell-quote: 1.12.0
 verifyDepsBeforeRun: false
