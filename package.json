@@ -18,7 +18,7 @@
   },
   "dependencies": {
     "@fastify/multipart": "^10.1.4",
-    "@fastify/static": "^10.1.6",
+    "@fastify/static": "^10.1.10",
     "archiver": "8.0.0",
     "fastify": "^5.12.7",
     "lucide-react": "^1.59.0",
@@ -33,7 +33,7 @@
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
     "concurrently": "10.0.6",
-    "happy-dom": "21.0.3",
+    "happy-dom": "21.0.4",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vite": "^8.3.4"

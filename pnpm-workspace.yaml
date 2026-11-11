@@ -4,4 +4,6 @@ confirmModulesPurge: false
 overrides:
   # Keep the established dev runner with the patched command quoting dependency.
   concurrently>shell-quote: 1.12.0
+  # Archive enumeration needs the patched glob matcher until readdir-glob is updated upstream.
+  readdir-glob>minimatch: 11.0.5
 verifyDepsBeforeRun: false
