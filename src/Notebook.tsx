@@ -4,7 +4,7 @@ import { api, ApiError } from "./api";
 import { ImageLightbox } from "./ImageLightbox";
 import { canApplyNoteRead, emptyNoteDraft, sameNoteDraft, settleNoteWrite, type Note, type NoteDraft, type NoteSummary } from "./note-editor";
 
-export interface NotebookHandle { saveBeforeLeave(): Promise<boolean> }
+export interface NotebookHandle { saveBeforeLeave(): Promise<boolean>; saveNow(): Promise<boolean> }
 export interface NotebookImage { id: string; name: string; mime: string; hasThumbnail: boolean }
 interface Props {
   ref?: Ref<NotebookHandle>;
@@ -268,6 +268,10 @@ export function Notebook({ ref, open, revision, files, onBack, onStorageChange, 
   }, [open]);
 
   useImperativeHandle(ref, () => ({
+    async saveNow() {
+      if (savePending.current) await savePending.current;
+      return save();
+    },
     async saveBeforeLeave() {
       if (uploadingImagesRef.current || recognizingIdsRef.current.size > 0) return false;
       if (!(await save(true))) return false;

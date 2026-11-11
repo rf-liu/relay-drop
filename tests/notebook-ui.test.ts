@@ -552,7 +552,7 @@ test("selected files can be downloaded individually or together as a streamed ar
   const originalClick = dom.HTMLAnchorElement.prototype.click;
   dom.HTMLAnchorElement.prototype.click = function clickDownload() { downloads.push(this.getAttribute("href") ?? ""); };
   t.after(() => { dom.HTMLAnchorElement.prototype.click = originalClick; });
-  const { requests } = await setup(t, ({ control }) => { control.files = files; }, false);
+  const { requests, control } = await setup(t, ({ control }) => { control.files = files; }, false);
   await flush();
 
   await click('[aria-label="选择 first.txt"]');
@@ -560,7 +560,9 @@ test("selected files can be downloaded individually or together as a streamed ar
   await click(".batch-download");
   assert.deepEqual(downloads, [`/api/files/${files[0].id}/download`]);
   assert.equal(requests.filter((request) => request.url === "/api/files/archive").length, 0);
+  assert.equal(field("选择 first.txt").checked, false);
 
+  await click('[aria-label="选择 first.txt"]');
   await click('[aria-label="选择 second.txt"]');
   assert.equal(dom.document.querySelector(".batch-download")?.getAttribute("aria-label"), "下载 2 项");
   await click(".batch-download");
@@ -568,6 +570,111 @@ test("selected files can be downloaded individually or together as a streamed ar
   const request = requests.find((item) => item.url === "/api/files/archive");
   assert.equal(request?.method, "POST");
   assert.deepEqual(new Set(request?.body.ids), new Set(files.map((file) => file.id)));
+  assert.equal(dom.document.querySelectorAll('.file-selection-input:checked').length, 0);
+
+  await click('[aria-label="全选文件"]');
+  control.before = async (method, url) => { if (method === "POST" && url === "/api/files/archive") throw new Error("Archive unavailable"); };
+  await click('.batch-download');
+  assert.equal(dom.document.querySelectorAll('.file-selection-input:checked').length, 2);
+  assert.equal(downloads.length, 2);
+});
+
+test("double-click and keyboard downloads clear only the downloaded selection", async (t) => {
+  const file = { id: "double-click-file", name: "document.txt", size: 5, mime: "text/plain", createdAt: "2026-01-01T00:00:00Z", hasThumbnail: false };
+  const other = { ...file, id: "other-file", name: "other.txt" };
+  await setup(t, ({ control }) => { control.files = [file, other]; }, false);
+  await flush();
+  const downloads: string[] = [];
+  const originalClick = dom.HTMLAnchorElement.prototype.click;
+  dom.HTMLAnchorElement.prototype.click = function () { downloads.push(this.getAttribute("href") ?? ""); };
+  t.after(() => { dom.HTMLAnchorElement.prototype.click = originalClick; });
+  await click('[aria-label="选择 other.txt"]');
+  const name = dom.document.querySelector('.file-info strong')!;
+  await act(async () => { name.dispatchEvent(new dom.MouseEvent("click", { bubbles: true, detail: 1 }) as unknown as Event); });
+  assert.equal(field("选择 document.txt").checked, true);
+  assert.equal(downloads.length, 0);
+  await act(async () => {
+    name.dispatchEvent(new dom.MouseEvent("click", { bubbles: true, detail: 2 }) as unknown as Event);
+    name.dispatchEvent(new dom.MouseEvent("dblclick", { bubbles: true, detail: 2 }) as unknown as Event);
+  });
+  assert.deepEqual(downloads, ["/api/files/double-click-file/download"]);
+  assert.equal(field("选择 document.txt").checked, false);
+  assert.equal(field("选择 other.txt").checked, true);
+  // The download must not remain the anchor of a later Shift selection.
+  await act(async () => { dom.document.querySelectorAll('.file-row')[1].dispatchEvent(new dom.MouseEvent("click", { bubbles: true, detail: 1, shiftKey: true }) as unknown as Event); });
+  assert.equal(field("选择 document.txt").checked, false);
+  await click('[aria-label="选择 other.txt"]');
+  await act(async () => { dom.document.querySelector('[aria-label="重命名 document.txt"]')!.dispatchEvent(new dom.MouseEvent("dblclick", { bubbles: true, detail: 2 }) as unknown as Event); });
+  assert.equal(downloads.length, 1);
+  await click('[aria-label="选择 document.txt"]');
+  await act(async () => { field("选择 document.txt").dispatchEvent(new dom.KeyboardEvent("keydown", { bubbles: true, key: "Enter" }) as unknown as Event); });
+  assert.equal(downloads.length, 2);
+  assert.equal(field("选择 document.txt").checked, false);
+  assert.equal(field("选择 other.txt").checked, true);
+  await click('[aria-label="选择 document.txt"]');
+  await act(async () => { dom.document.querySelector('[aria-label="下载 document.txt"]')!.dispatchEvent(new dom.MouseEvent("click", { bubbles: true, cancelable: true }) as unknown as Event); });
+  assert.equal(field("选择 document.txt").checked, false);
+  assert.equal(field("选择 other.txt").checked, true);
+  assert.equal(dom.document.querySelector('.row-select'), null);
+});
+
+test("sorting buttons change file order and preserve selections", async (t) => {
+  const files = [
+    { id: "b", name: "B.txt", size: 20, mime: "text/plain", createdAt: "2026-01-01T00:00:00Z", hasThumbnail: false },
+    { id: "a", name: "A.txt", size: 10, mime: "text/plain", createdAt: "2026-01-02T00:00:00Z", hasThumbnail: false },
+  ];
+  await setup(t, ({ control }) => { control.files = files; }, false);
+  await flush();
+  await click('[aria-label="选择 A.txt"]');
+  await click('[aria-label="按大小排序"]');
+  assert.equal(dom.document.querySelector('.file-info strong')?.textContent, "B.txt");
+  assert.equal(field("选择 A.txt").checked, true);
+  await click('[aria-label="按名称排序"]');
+  assert.equal(dom.document.querySelector('.file-info strong')?.textContent, "A.txt");
+  assert.equal(dom.document.querySelector('[aria-label="按名称排序"]')?.getAttribute("aria-pressed"), "true");
+});
+
+test("Ctrl+S and Command+S save the active text and prevent browser page saving", async (t) => {
+  const { requests, notes } = await setup(t, undefined, false);
+  await flush();
+  for (const modifier of ["ctrlKey", "metaKey"] as const) {
+    await type("共享剪贴板内容", `Clipboard ${modifier}`);
+    const event = new dom.KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "s", [modifier]: true });
+    await act(async () => { field("共享剪贴板内容").dispatchEvent(event as unknown as Event); });
+    await flush();
+    assert.equal(event.defaultPrevented, true);
+    assert.equal(requests.filter((request) => request.url === "/api/clipboard" && request.method === "PUT").at(-1)?.body.content, `Clipboard ${modifier}`);
+  }
+  await click('[aria-label="打开记事本"]');
+  await openNote("Test A");
+  const clipboardWrites = requests.filter((request) => request.url === "/api/clipboard" && request.method === "PUT").length;
+  await type("笔记标题", "Saved title");
+  const noteSave = new dom.KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "S", ctrlKey: true });
+  await act(async () => { field("笔记标题").dispatchEvent(noteSave as unknown as Event); });
+  await flush();
+  assert.equal(noteSave.defaultPrevented, true);
+  assert.equal(notes.get("a")?.title, "Saved title");
+  assert.equal(requests.filter((request) => request.url === "/api/clipboard" && request.method === "PUT").length, clipboardWrites);
+  await type("笔记内容", "Saved with Command");
+  await act(async () => { field("笔记内容").dispatchEvent(new dom.KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "s", metaKey: true }) as unknown as Event); });
+  await flush();
+  assert.equal(notes.get("a")?.content, "Saved with Command");
+});
+
+test("a save shortcut queued behind a clipboard write saves the newest typing", async (t) => {
+  const { requests, control } = await setup(t, undefined, false);
+  await flush();
+  const gate = deferred();
+  control.before = async (method, url) => { if (method === "PUT" && url === "/api/clipboard") await gate.promise; };
+  await type("共享剪贴板内容", "First version");
+  const shortcut = () => field("共享剪贴板内容").dispatchEvent(new dom.KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "s", ctrlKey: true }) as unknown as Event);
+  await act(async () => { shortcut(); });
+  await type("共享剪贴板内容", "Final version");
+  await act(async () => { shortcut(); });
+  gate.resolve();
+  await flush();
+  await flush();
+  assert.deepEqual(requests.filter((request) => request.url === "/api/clipboard" && request.method === "PUT").map((request) => request.body.content), ["First version", "Final version"]);
 });
 
 test("file rows support range selection, mixed select-all, visible-only filtering, and escape", async (t) => {
@@ -579,13 +686,13 @@ test("file rows support range selection, mixed select-all, visible-only filterin
   assert.equal(field("选择 C.zip").checked, true);
   assert.equal(field("全选文件").indeterminate, true);
   await act(async () => { rows[2].dispatchEvent(new dom.MouseEvent("click", { bubbles: true, shiftKey: true }) as unknown as Event); });
-  assert.equal(dom.document.querySelectorAll('.row-select input:checked').length, 3);
+  assert.equal(dom.document.querySelectorAll('.file-selection-input:checked').length, 3);
   assert.equal(field("全选文件").indeterminate, false);
   assert.equal(field("全选文件").checked, true);
   await type("搜索文件", ".pdf");
   assert.match(dom.document.querySelector('.selection-hidden')?.textContent ?? "", /含 1 项/);
   await click('[aria-label="全选搜索结果"]');
-  assert.equal(dom.document.querySelectorAll('.row-select input:checked').length, 0);
+  assert.equal(dom.document.querySelectorAll('.file-selection-input:checked').length, 0);
   assert.match(dom.document.querySelector('.selection-count')?.textContent ?? "", /已选 1 项/);
   await type("搜索文件", "no matches");
   assert.equal(dom.document.querySelector<HTMLButtonElement>('.batch-download')?.disabled, false);
@@ -594,7 +701,7 @@ test("file rows support range selection, mixed select-all, visible-only filterin
   await type("搜索文件", "");
   await click('[aria-label="选择 A.pdf"]');
   await act(async () => { field("选择 A.pdf").dispatchEvent(new dom.KeyboardEvent("keydown", { bubbles: true, key: "Escape" }) as unknown as Event); });
-  assert.equal(dom.document.querySelectorAll('.row-select input:checked').length, 0);
+  assert.equal(dom.document.querySelectorAll('.file-selection-input:checked').length, 0);
 });
 
 test("rename actions do not change selection and Enter during Chinese composition cannot save a name", async (t) => {

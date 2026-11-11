@@ -30,6 +30,7 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useEffectEvent,
   useMemo,
   useRef,
   useState,
@@ -279,6 +280,7 @@ export default function App() {
   const draftRef = useRef("");
   const clipboardEditRevision = useRef(0);
   const manualSyncQueued = useRef(false);
+  const manualSaveQueued = useRef(false);
   const composingRef = useRef(false);
   const addingNoteRef = useRef(false);
   const noteSnapshot = useRef<{ id: string; content: string } | null>(null);
@@ -466,6 +468,33 @@ export default function App() {
   useEffect(() => {
     if (manualSyncQueued.current && !saving && !refreshingClipboard && !composing) void syncClipboard();
   }, [saving, refreshingClipboard, composing, syncClipboard]);
+
+  const flushClipboardSave = useEffectEvent(() => {
+    if (clipboardWritePending.current || clipboardRefreshPending.current || composingRef.current) return;
+    manualSaveQueued.current = false;
+    if (dirtyRef.current) void saveClipboard();
+    else notify("没有新的改动");
+  });
+
+  const saveTextShortcut = useEffectEvent(() => {
+    if (notebookOpenRef.current) { void notebookRef.current?.saveNow(); return; }
+    manualSaveQueued.current = true;
+    flushClipboardSave();
+  });
+
+  useEffect(() => {
+    if (manualSaveQueued.current && !saving && !refreshingClipboard && !composing) flushClipboardSave();
+  }, [saving, refreshingClipboard, composing]);
+
+  useEffect(() => {
+    const onSave = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.key.toLowerCase() !== "s") return;
+      event.preventDefault();
+      if (!event.repeat && !event.isComposing) saveTextShortcut();
+    };
+    document.addEventListener("keydown", onSave);
+    return () => document.removeEventListener("keydown", onSave);
+  }, []);
 
   useEffect(() => {
     const delay = clipboardAutosaveDelay({ dirty, saving, composing, refreshing: refreshingClipboard, failed: Boolean(clipboardError), retryable: clipboardRetryable });
@@ -968,11 +997,22 @@ export default function App() {
     link.remove();
   };
 
+  const clearDownloadedSelection = (ids: string[]) => {
+    const downloaded = new Set(ids);
+    setSelectedIds((current) => new Set([...current].filter((id) => !downloaded.has(id))));
+    if (selectionAnchor.current && downloaded.has(selectionAnchor.current)) selectionAnchor.current = null;
+  };
+
+  const downloadFile = (id: string) => {
+    startBrowserDownload(`/api/files/${id}/download`);
+    clearDownloadedSelection([id]);
+  };
+
   const downloadSelected = async () => {
     const ids = state.files.filter((file) => selectedIds.has(file.id)).map((file) => file.id);
     if (!ids.length) return;
     if (ids.length === 1) {
-      startBrowserDownload(`/api/files/${ids[0]}/download`);
+      downloadFile(ids[0]);
       return;
     }
     setBatchDownloading(true);
@@ -982,6 +1022,7 @@ export default function App() {
         body: JSON.stringify({ ids }),
       });
       startBrowserDownload(result.url);
+      clearDownloadedSelection(ids);
       notify(`正在下载 ${ids.length} 个文件`);
     } catch (error) {
       notify((error as Error).message, "error");
@@ -1180,11 +1221,11 @@ export default function App() {
             <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索文件" aria-label="搜索文件" />
             {query && <button onClick={() => setQuery("")} aria-label="清除搜索"><X size={14} /></button>}
           </label>
-          <select className="sort-select" value={sort} onChange={(event) => setSort(event.target.value as typeof sort)} aria-label="文件排序">
-            <option value="newest">最新上传</option>
-            <option value="name">按名称</option>
-            <option value="size">按大小</option>
-          </select>
+          <div className="sort-options" role="group" aria-label="文件排序">
+            {([['newest', '最新', '按最新上传排序'], ['name', '名称', '按名称排序'], ['size', '大小', '按大小排序']] as const).map(([value, label, description]) => (
+              <button key={value} type="button" className="sort-option" aria-label={description} aria-pressed={sort === value} title={description} onClick={() => setSort(value)}>{label}</button>
+            ))}
+          </div>
         </div>
 
         {(state.files.length > 0 || selectedIds.size > 0) && <div className={`file-selection-toolbar ${selectedIds.size ? "has-selection" : ""}`}>
@@ -1217,22 +1258,31 @@ export default function App() {
               {query && <button className="button ghost" onClick={() => setQuery("")}>清除搜索</button>}
             </div>
           ) : visibleFiles.map((file) => (
-            <article className={`file-row ${selectedIds.has(file.id) ? "is-selected" : ""}`} key={file.id} tabIndex={-1} onClick={(event) => {
+            <article className={`file-row ${selectedIds.has(file.id) ? "is-selected" : ""}`} key={file.id} onClick={(event) => {
               if ((event.target as HTMLElement).closest("button, a, input, label")) return;
-              if (editingId) return;
+              if (editingId || event.detail > 1) return;
               toggleSelected(file.id, event.shiftKey);
-              event.currentTarget.focus({ preventScroll: true });
+              event.currentTarget.querySelector<HTMLInputElement>(".file-selection-input")?.focus({ preventScroll: true });
+            }} onDoubleClick={(event) => {
+              if ((event.target as HTMLElement).closest("button, a, input, label") || editingId || batchDeleting) return;
+              event.preventDefault();
+              downloadFile(file.id);
             }}>
-              <label className="row-select">
                 <input
+                  className="file-selection-input"
                   type="checkbox"
                   checked={selectedIds.has(file.id)}
                   onChange={() => {}}
                   onClick={(event) => toggleSelected(file.id, event.shiftKey)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !event.repeat && !batchDeleting) {
+                      event.preventDefault();
+                      downloadFile(file.id);
+                    }
+                  }}
                   disabled={batchDeleting}
                   aria-label={`选择 ${file.name}`}
                 />
-              </label>
               <FileVisual file={file} onPreview={setPreviewImage} />
               <div className="file-info">
                 {editingId === file.id ? (
@@ -1252,7 +1302,7 @@ export default function App() {
                     aria-label={`修改 ${file.name} 的文件名`}
                     maxLength={180}
                   />
-                ) : <strong title={file.name}>{file.name}</strong>}
+                ) : <strong title={`${file.name}\n双击下载`}>{file.name}</strong>}
                 <span>{formatBytes(file.size)} · {relativeTime(file.createdAt)}</span>
               </div>
               <div className="file-actions">
@@ -1270,7 +1320,7 @@ export default function App() {
                     <button className="file-action rename-action" onClick={() => startRename(file)} title="重命名" aria-label={`重命名 ${file.name}`}>
                       <Pencil size={15} />
                     </button>
-                    <a className="file-action primary-action" href={`/api/files/${file.id}/download`} title="下载" aria-label={`下载 ${file.name}`}>
+                    <a className="file-action primary-action" href={`/api/files/${file.id}/download`} onClick={() => clearDownloadedSelection([file.id])} title="下载" aria-label={`下载 ${file.name}`}>
                       <Download size={17} />
                     </a>
                     <button className="file-action delete-action" onClick={() => void deleteFile(file)} title="删除" aria-label={`删除 ${file.name}`}>

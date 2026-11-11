@@ -298,13 +298,6 @@ select:focus-visible,
 .drop-copy { display: grid; gap: 5px; min-width: 0; }
 .drop-copy strong { font-size: 13px; }
 .drop-copy span { color: var(--ink-faint); font-size: 11px; }
-.sort-select {
-  border: 0;
-  outline: 0;
-  background: transparent;
-  color: var(--ink);
-  cursor: pointer;
-}
 
 .file-selection-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; min-height: 54px; margin: 0 26px; padding: 8px 0; border-bottom: 1px solid var(--line); }
 .selection-summary, .selection-actions { display: flex; align-items: center; gap: 8px; }
@@ -325,8 +318,7 @@ select:focus-visible,
   cursor: pointer;
 }
 .select-all:hover { color: var(--ink); }
-.select-all input, .row-select input { margin: 0; accent-color: var(--accent); cursor: pointer; }
-.select-all input, .row-select input { width: 16px; height: 16px; }
+.select-all input { margin: 0; accent-color: var(--accent); cursor: pointer; width: 16px; height: 16px; }
 .batch-download, .batch-delete {
   display: inline-flex;
   align-items: center;
@@ -409,23 +401,20 @@ select:focus-visible,
 .search-box input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--ink); font-size: 12px; }
 .search-box input::placeholder { color: var(--ink-faint); }
 .search-box button { display: grid; place-items: center; padding: 2px; border: 0; background: transparent; color: var(--ink-faint); cursor: pointer; }
-.sort-select {
-  margin-left: auto;
-  padding: 8px 9px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--surface-subtle);
-  color: var(--ink-soft);
-  font-size: 11px;
-}
+.sort-options { display: flex; align-items: center; flex-shrink: 0; gap: 2px; margin-left: auto; }
+.sort-option { position: relative; min-height: 36px; padding: 8px; border: 0; border-radius: 7px; background: transparent; color: var(--ink-faint); font-size: 12px; cursor: pointer; }
+.sort-option:hover { color: var(--ink); background: var(--surface-hover); }
+.sort-option[aria-pressed="true"] { color: var(--ink); font-weight: 600; }
+.sort-option[aria-pressed="true"]::after { content: ""; position: absolute; bottom: 2px; left: 8px; right: 8px; height: 2px; border-radius: 2px; background: var(--accent); }
 
 .file-list { padding: 0 14px 6px; }
 .file-row {
+  position: relative;
   user-select: none;
   display: grid;
-  grid-template-columns: 36px 44px minmax(0, 1fr) auto;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
   min-height: 72px;
   padding: 9px 12px;
   border-top: 1px solid var(--line);
@@ -435,8 +424,8 @@ select:focus-visible,
 .file-row:first-child { border-top: 0; }
 .file-row:hover { border-radius: 12px; background: var(--surface-subtle); }
 .file-row.is-selected { border-radius: 12px; background: color-mix(in srgb, var(--accent-soft) 52%, transparent); }
-.row-select { display: grid; place-items: center; width: 36px; height: 44px; cursor: pointer; }
-.file-row:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: -2px; border-radius: 12px; }
+.file-selection-input { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
+.file-row:has(.file-selection-input:focus-visible) { outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: -2px; border-radius: 12px; }
 .file-icon {
   display: grid;
   place-items: center;
@@ -655,13 +644,12 @@ select:focus-visible,
   .selection-reset { width: 24px; }
   .file-list { padding-inline: 8px; }
   .file-row {
-    grid-template-columns: 32px 42px minmax(0, 1fr) auto;
+    grid-template-columns: 42px minmax(0, 1fr) auto;
     gap: 8px;
     padding: 12px 10px;
   }
   .file-icon { width: 42px; height: 42px; }
-  .file-actions { grid-column: 4; }
-  .row-select { width: 32px; }
+  .file-actions { grid-column: 3; }
   .choose-files { padding-inline: 10px; }
 }
 
@@ -672,10 +660,10 @@ select:focus-visible,
   .section-icon { width: 32px; height: 32px; }
   .button { font-size: 11px; }
   .button.ghost { flex: 0 0 auto; }
-  .sort-select { width: 100px; }
-  .file-row { grid-template-columns: 32px 42px minmax(0, 1fr); }
-  .file-actions { grid-column: 3; justify-self: end; }
-  .file-row > .row-select, .file-row > .file-icon { grid-row: 1 / 3; }
+  .sort-option { padding-inline: 6px; font-size: 11px; }
+  .file-row { grid-template-columns: 42px minmax(0, 1fr); }
+  .file-actions { grid-column: 2; justify-self: end; }
+  .file-row > .file-icon { grid-row: 1 / 3; }
   .file-selection-toolbar .batch-download, .file-selection-toolbar .batch-delete { padding-inline: 7px; gap: 4px; }
   .selection-count { font-size: 10px; }
   .drop-icon { display: none; }
